@@ -1,0 +1,238 @@
+---
+title: "Analyzing NHC Tropical Storm Data"
+author: "Theresia Bernadette Phoa"
+date: "2023-09-14"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+In this script, we want to analyze the National Hurricane Center (NHC) storm tracks data covering the Atlantic Basin for the years 1975 to 2021, except for the last storm in 2021 (Wanda). This dataset has been made available to us through the dplyr package.
+
+**Questions to Address:**  
+1. Do Higher Wind Speeds Correspond to Wider Tropical Storm Diameter?  
+2. Which Months Typically Witness More Intense Storms?  
+3. Spatial distributions of the storms before and after year 2000  
+
+```{r, eval = TRUE, include = TRUE, message=FALSE, results="hide"}
+## Load required packages
+library(tidyverse)  # For data manipulation and plotting
+library(dplyr)      # For data manipulation
+library(sf)         # For spatial data handling
+library(OpenStreetMap)  # For working with OpenStreetMap data
+library(gridExtra)  # For arranging plots
+
+# Load the 'storms' data from dplyr package
+storms
+```
+
+## Exploring the Data
+```{r, eval = TRUE, include = TRUE, message=FALSE }
+# Check for the latest data available
+tail(storms)
+```
+
+
+```{r}
+# Check for recorded years and months in the data
+unique(pull(storms, year))
+```
+```{r}
+unique(pull(storms, month))
+```
+Although there are storms in every year from 1975-2021, some months may have no recorded storms
+```{r}
+sort(unique(pull(storms, month)))  
+```
+```{r}
+# Check recorded days in the data
+sort(unique(pull(storms, day)))
+```
+This step below might be a little bit confusing, because from tail() output we saw 2 columns for category. The 'status' column is for the storm classification (tropical wave - Hurricane ), and 'category' column is category of the hurricane based on saffir-simpson scale (1, 2, 3, 4, 5)
+```{r}
+# Check what are the category of storms available.
+unique(pull(storms, status))
+```
+```{r}
+# Generate a summary of the data, here we can scan through the data for any NAs
+summary(storms)
+```
+Tropical storm & hurricane force wind diameter data are not available until 2004.
+```{r}
+# Create a copy of the 'storms' data in a new dataframe to work with, 
+# so we don't have to download it everytime we want to use the script 
+# (e.g., data cleaning, data manipulation, etc.)
+storms <- storms
+table(storms$status)
+```
+```{r fig1, out.width = '70%'}
+# Create a histogram of 'pressure' values
+hist(storms$pressure)
+
+```
+
+
+Now, we want to group the data by storm name, filter to get minimum pressure and maximum wind for each storm. This data is originally a point observation data, we can use it for track visualization. However, to analyze the storm events statistics won't be effective if we don't summarize the data.
+```{r}
+storm_summary <- storms %>%
+  group_by(name) %>%
+  filter(pressure == min(pressure)) %>%
+  filter(status %in% c("tropical storm", "hurricane")) %>%
+  filter(wind == max(wind)) %>%
+  mutate(date = as.POSIXct(paste(year, month, day, hour, sep = "-"), 
+                           format = "%Y-%m-%d-%H")) %>%
+  filter(date == max(date))
+```
+We also filter the data only for recorded tropical storms (>34 kts) and hurricanes (>64 kts)
+```{r}
+# Create 'decade' column to group storms by decade
+storm_summary <- storm_summary %>%
+  mutate(decade = 10 * (year %/% 10))
+```
+```{r}
+# Create a boxplot of wind speeds by decade
+boxplot(wind ~ decade, data = storm_summary, las = 1)
+```
+```{r}
+# Create a summary dataframe for number of tropical storms and hurricanes by decade
+summary_decade <- storm_summary %>%
+  group_by(decade, status) %>%
+  summarize(count = n())
+
+# Pivot the summary data to wide format
+summary_wide <- summary_decade %>%
+  pivot_wider(names_from = status, values_from = count, values_fill = 0)
+
+# Create a matrix for the barplot
+decade_matrix <- t(as.matrix(summary_wide[, -1]))
+```
+```{r fig3, fig4, out.width = '70%'}
+# Create a barplot
+barplot(decade_matrix, beside = TRUE, 
+        names.arg = unique(summary_wide$decade),
+        xlab = "Decade",
+        ylab = "Number of Occurrences",
+        main = "Number of Tropical Storm and Hurricane Occurrences by Decade",
+        legend.text = c("Tropical Storm", "Hurricane"),
+        args.legend = list(x = "topright", bty = "n"))
+
+# Create a scatterplot of tropical storm force diameter vs wind speed
+plot(storm_summary$tropicalstorm_force_diameter,
+     storm_summary$wind,
+     xlab = "Diameter (nautical miles)",
+     ylab = "Wind Speed (knots)",
+     main = "Tropical Storm Force Diameter vs Wind Speed")
+```
+```{r}
+# Calculate the correlation coefficient between wind speed and tropical 
+# storm force diameter.
+correlation_coefficient <- cor(storm_summary$wind, 
+                               storm_summary$tropicalstorm_force_diameter, 
+                               use = "complete.obs")
+cat("Correlation Coefficient:", correlation_coefficient, "\n")
+```
+```{r}
+# Find the storm with the largest tropical storm force diameter
+largest_diameter_name <- storm_summary$name[which.max(storm_summary$tropicalstorm_force_diameter)]
+largest_diameter_name
+```
+```{r}
+# Create a summary of hurricane counts by month
+month_hurricane <- storm_summary %>%
+  filter(category %in% c(1:6)) %>%
+  group_by(month) %>%
+  summarize(hurricane_count = n())
+
+# Find the peak hurricane season
+peak_season_hurricane <- month_hurricane %>%
+  arrange(desc(hurricane_count)) %>%
+  head(1)
+
+peak_season_hurricane
+```
+```{r, message=FALSE, warning=FALSE}
+# Calculate correlation coefficients between wind speed > 64 knots 
+# and each month
+correlation_coefficients <- sapply(1:12, function(i) {
+  cor(storm_summary$wind[storm_summary$wind > 64],
+      storm_summary$month[storm_summary$wind > 64] == i,
+      method = "spearman")
+})
+
+# Create a dataframe to store the correlation coefficients and 
+# corresponding months
+correlation_df <- data.frame(
+  Month = 1:12,
+  Correlation_Coefficient = correlation_coefficients
+)
+
+# Print the correlation coefficients
+correlation_df
+```
+### Spatial distributions of the storms before and after year 2000
+```{r}
+# Subset the 'storms' data for years before 2000 and after 2000
+storms_before_2000 <- storms %>% 
+  filter(year < 2000) %>%
+  filter(status %in% c("tropical storm", "hurricane"))
+  
+storms_after_2000 <- storms %>% 
+  filter(year >= 2000) %>%
+  filter(status %in% c("tropical storm", "hurricane"))
+
+# Define latitudes and longitudes for the map
+lat1 <- 5; lat2 <- 60; lon1 <- -110; lon2 <- 6
+
+# Create a base map using OpenStreetMap
+base_map <- openmap(c(lat2, lon1), c(lat1, lon2), zoom = 4, type = "osm", 
+                    mergeTiles = TRUE)
+base_map2 <- openproj(base_map)
+
+# Create a plot for hurricane tracks on top of the base map
+plot_before_2000 <- OpenStreetMap::autoplot.OpenStreetMap(base_map2) +
+  geom_path(data = storms_before_2000, aes(x = long, y = lat, color = paste(year, name)),
+            show.legend = FALSE) +
+  xlab("Longitude (°)") + ylab("Latitude (°)") +
+  labs(title = "Tropical Storms & Hurricane Tracks (1975-1999)")
+
+plot_after_2000 <- OpenStreetMap::autoplot.OpenStreetMap(base_map2) +
+  geom_path(data = storms_after_2000, aes(x = long, y = lat, color = paste(year, name)),
+            show.legend = FALSE) + xlab("Longitude (°)") + ylab("Latitude (°)") +
+  labs(title = "Tropical Storms & Hurricane Tracks (2000-2021)")
+
+# Arrange the plots side by side
+grid.arrange(plot_before_2000, plot_after_2000, nrow = 2)
+```
+
+### Other statistical analysis (likelihood of trop. storm events per extended period)
+```{r fig6, out.width = '70%'}
+# Calculate Poisson distribution
+# Filter the data frame to include only category 4 or 5 hurricanes
+storm_summary_cat4 <- storm_summary %>%
+  filter(category == '4')
+
+storm_summary_cat5 <- storm_summary %>%
+  filter(category == '5')
+
+# Calculate the total number of category 4 and 5 hurricanes over the decade
+total_category4 <- nrow(storm_summary_cat4)
+total_category5 <- nrow(storm_summary_cat5)
+
+# Calculate the average number of category 4 and 5 hurricanes per year
+average_category4_per_year <- total_category4 / 46
+average_category5_per_year <- total_category5 / 46
+
+# Create a sequence of numbers for plotting the Poisson distribution
+x = 1:50
+
+# Calculate the Poisson probabilities for category 4 and 5 hurricanes
+poisson_cat4 <- dpois(x, lambda = average_category4_per_year)
+poisson_cat5 <- dpois(x, lambda = average_category5_per_year)
+
+# Create a two-panel plot for Poisson distribution
+par(mfrow = c(1, 2)) 
+plot(x, poisson_cat4, type = "l", lwd = 3, col = "navy")
+plot(x, poisson_cat5, type = "l", lwd = 3, col = "navy")
+```
+
